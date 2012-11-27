@@ -385,6 +385,7 @@ class HttpClient
                 $this->pushArrData($retArr["Header"], $key, $val);
                 $this->pushArrData($retArr["HeaderTidy"], $tKey, $val);
             }
+            ++$lineFlag;
             // 添加正文
             for (; $lineFlag<count($contentArr); $lineFlag++)
             {

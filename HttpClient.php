@@ -56,19 +56,19 @@ class HttpClient
        
     
     /**
-     * 生成POST每数组的查询字符串
+     * 生成POST(包含上传文件)每数组的查询字符串
      * @param string $key
      * @param array|string $val
      * @return string
      */
-    private function buildSubPostContent($key, $val)
+    private function buildSubMultipartPostContent($key, $val)
     {
         $ret = "";
         if (is_array($val))
         {
             foreach ($val as $d)
             {
-                $ret .= $this->buildSubPostContent($key . "[]", $d);
+                $ret .= $this->buildSubMultipartPostContent($key . "[]", $d);
             }
         }
         else
@@ -94,23 +94,76 @@ class HttpClient
         return $ret;
     }
     
+    /**
+     * 生成POST(普通数据)每数组的查询字符串
+     * @param string $key
+     * @param array|string $val
+     * @return string
+     */
+    private function buildSubPlainPostContent($key, $val)
+    {
+        $ret = "";
+        if (is_array($val))
+        {
+            foreach ($val as $d)
+            {
+                $ret .= $this->buildSubPlainPostContent($key . "[]", $d);
+            }
+        }
+        else
+        {
+            if ($ret)
+            {
+                $ret .= "&";
+            }
+            $ret .= $key . "=" . urlencode($val);
+        }
+        return $ret;
+    }
+    
     
     /**
      * 生成POST查询字符串
      * @param array $data
-     * @return string
+     * @return array
      */
     private function buildPostString(array $data)
     {
+        $isWithPostFile = false;
+        foreach ($data as $p)
+        {
+            if ($p instanceof HttpClientUploadFile)
+            {
+                $isWithPostFile = true;
+                break;
+            }
+        }
         $querystring = "";
         if (count($data) > 0)
         {
-            foreach ($data as $key => $val)
+            if ($isWithPostFile)
             {
-                $querystring .= $this->buildSubPostContent($key, $val);
+                foreach ($data as $key => $val)
+                {
+                    $querystring .= $this->buildSubMultipartPostContent($key, $val);
+                }
+            }
+            else
+            {
+                foreach ($data as $key => $val)
+                {
+                    if ($querystring)
+                    {
+                        $querystring .= "&";
+                    }
+                    $querystring .= $this->buildSubPlainPostContent($key, $val);
+                }
             }
         }
-        return $querystring;
+        return array(
+            "isMultipart" => $isWithPostFile,
+            "queryString" => $querystring,
+        );
     }
     
     
@@ -179,13 +232,13 @@ class HttpClient
     {
         $uriData = parse_url($uri);
         
-        $postQueryStr = "";
+        $postQueryData = null;
         $method = "GET";            // 默认GET
         if ($postData)
         {
-            $postQueryStr = $this->buildPostString($postData);
+            $postQueryData = $this->buildPostString($postData);
         }
-        if (!empty($postQueryStr))
+        if (!empty($postQueryData["queryString"]))
         {
             $method = "POST";
         }
@@ -242,14 +295,20 @@ class HttpClient
             $headers[] = 'Authorization: BASIC ' . base64_encode($this->authData["username"] . ':' . $this->authData["password"]);
         }
         // 按POST提交的方式
-        if ($method == "POST")
+        if ($method == "POST" && $postQueryData)
         {
-            //$headers[] = "Content-Type: application/x-www-form-urlencoded";
-            $headers[] = "Content-Type: multipart/form-data, boundary={$this->boundary}";       // 兼容文件上传
-            $headers[] = "Content-Length: " . strlen($postQueryStr);
+            if ($postQueryData["isMultipart"])
+            {
+                $headers[] = "Content-Type: multipart/form-data, boundary={$this->boundary}";       // 兼容文件上传
+            }
+            else
+            {
+                $headers[] = "Content-Type: application/x-www-form-urlencoded";
+            }
+            $headers[] = "Content-Length: " . strlen($postQueryData["queryString"]);
             // POST的内容
             $headers[] = "";
-            $headers[] = $postQueryStr;
+            $headers[] = $postQueryData["queryString"];
         }
         // 没有换行不会提交?
         $headers[] = "";
@@ -328,6 +387,24 @@ class HttpClient
     
     
     /**
+     * 解开header中某一行的数据
+     * @param type $text
+     * @return null
+     */
+    private function parseHeaderPart($text)
+    {
+        $match = array();
+        if (!preg_match('/(?P<key>[^:]+):\\s*(?P<val>[\s\S]*)/', $text, $match))
+        {
+            return null;
+        }
+        return array(   "key" => trim($match["key"]), 
+                        "val" => trim($match["val"])
+            );
+    }
+    
+    
+    /**
      * 解开Response得到的内容
      * @param array $contentArr
      * @return array
@@ -358,7 +435,29 @@ class HttpClient
                 throw new HttpClientException("NO HTTP STATUS \r\n------\r\n\r\n" . implode("\r\n", $contentArr));
             }
             
-            if (trim($httpStatusCode) != "200")
+            $httpStatusCode = trim($httpStatusCode);
+            if ($httpStatusCode == "302" || $httpStatusCode == "303")
+            {
+                // 重定向
+                $locationUrlData = $this->getRedirectLocation($contentArr);
+                if ($locationUrlData)
+                {
+                    if ($locationUrlData["host"] == $this->host)
+                    {
+                        $reResponseData = $this->doRequest($locationUrlData["url"]);
+                        return $this->parseResponseArr($reResponseData);
+                    }
+                    else
+                    {
+                        throw new HttpClientLocationException($this->host . " 当前CLIENT无法重定向至 " . $locationUrlData["host"], $httpStatusCode);
+                    }
+                }
+                else
+                {
+                    throw new HttpClientException("Http Status is {$httpStatusCode} , but not Location!", $httpStatusCode);
+                }
+            }
+            if ($httpStatusCode != "200")
             {
                 throw new HttpClientException("The Request Faild", $httpStatusCode);
             }
@@ -372,8 +471,8 @@ class HttpClient
                     break;              // 分行, 下面是正文内容
                 }
                 
-                $match = array();
-                if (!preg_match('/(?P<key>[^:]+):\\s*(?P<val>.*)/', $contentArr[$lineFlag], $match))
+                $match = $this->parseHeaderPart($contentArr[$lineFlag]);
+                if ($match == null)
                 {
                     continue;
                 }
@@ -385,7 +484,6 @@ class HttpClient
                 $this->pushArrData($retArr["Header"], $key, $val);
                 $this->pushArrData($retArr["HeaderTidy"], $tKey, $val);
             }
-            ++$lineFlag;
             // 添加正文
             for (; $lineFlag<count($contentArr); $lineFlag++)
             {
@@ -403,6 +501,34 @@ class HttpClient
         
         // 没有获取到值
         throw new HttpClientException("Request Faild, GET EMPTY ?");
+    }
+    
+    
+    /**
+     * 获取重定向后的地址
+     * @param array $contentArr
+     * @return array
+     */
+    private function getRedirectLocation(array $contentArr)
+    {
+        for ($lineFlag=1; $lineFlag<count($contentArr); $lineFlag++)
+        {
+            $match = $this->parseHeaderPart($contentArr[$lineFlag]);
+            if ($match == null)
+            {
+                continue;
+            }
+            if (strtoupper($match["key"]) == "LOCATION")
+            {
+                $info = parse_url($match["val"]);
+                $ret = array(
+                    "host" => isset($info["host"]) ? $info["host"] : $this->host,
+                    "url" => $match["val"],
+                );
+                return $ret;
+            }
+        }
+        return null;
     }
     
     
@@ -546,6 +672,15 @@ class HttpClient
             return $this->cookies[$path];
         }
         return array();
+    }
+    
+    
+    /**
+     * 清空Cookies
+     */
+    public function clearCookies()
+    {
+        $this->cookies = array();
     }
     
     

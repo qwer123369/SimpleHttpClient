@@ -116,7 +116,7 @@ class HttpClient
             {
                 $ret .= "&";
             }
-            $ret .= $key . "=" . urlencode($val);
+            $ret .= $key . "=" . $val;
         }
         return $ret;
     }
@@ -484,7 +484,9 @@ class HttpClient
                 $this->pushArrData($retArr["Header"], $key, $val);
                 $this->pushArrData($retArr["HeaderTidy"], $tKey, $val);
             }
-            // 添加正文
+            
+            ++$lineFlag;        // 分割的空行
+            // 添加正文 
             for (; $lineFlag<count($contentArr); $lineFlag++)
             {
                 $retArr["Contents"] .= $contentArr[$lineFlag];
@@ -586,7 +588,6 @@ class HttpClient
         fclose($fp);
         
         $responseData = $this->parseResponseArr($responseArr);
-        
         // 内容解压缩
         if (isset($responseData["HeaderTidy"]["content-encoding"]) && strtolower($responseData["HeaderTidy"]["content-encoding"]) == "gzip")
         {

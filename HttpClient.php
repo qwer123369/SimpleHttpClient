@@ -662,6 +662,20 @@ class HttpClient
     
     
     /**
+     * 批量设置Cookies
+     * @param array $cookies
+     * @param type $path
+     */
+    public function setCookies(array $cookies, $path="/")
+    {
+        foreach ($cookies as $key => $val)
+        {
+            $this->setCookie($key, $val, $path);
+        }
+    }
+    
+    
+    /**
      * 获取Cookie数据
      * @param string $path
      * @return array
